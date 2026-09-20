@@ -1,0 +1,48 @@
+{
+  "type": "post_call_transcription",
+  "event_timestamp": 1789060360,
+  "data": {
+    "agent_id": "agent_example",
+    "conversation_id": "conv_example_001",
+    "status": "done",
+    "transcript": [
+      {
+        "role": "agent",
+        "message": "Hello Rahul, when can you bring the car for service?",
+        "time_in_call_secs": 0
+      },
+      {
+        "role": "user",
+        "message": "Friday at 10 AM.",
+        "time_in_call_secs": 4
+      },
+      {
+        "role": "agent",
+        "message": "Just to confirm, Friday at 10 AM?",
+        "time_in_call_secs": 7
+      },
+      {
+        "role": "user",
+        "message": "Yes.",
+        "time_in_call_secs": 10
+      }
+    ],
+    "metadata": {
+      "call_duration_secs": 12
+    },
+    "analysis": {
+      "call_successful": "success",
+      "transcript_summary": "Driver confirmed Friday at 10 AM."
+    },
+    "conversation_initiation_client_data": {
+      "dynamic_variables": {
+        "Driver_Name": "Rahul Kumar",
+        "driver_phone": "+919876543210",
+        "Car_Registration_Number": "KA01AB1238",
+        "Due_date": "2026-09-15",
+        "depot_name": "Bangalore Central Depot",
+        "correlation_id": "MAINT-10001"
+      }
+    }
+  }
+}
