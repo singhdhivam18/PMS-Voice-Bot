@@ -5,6 +5,7 @@ from fastapi import FastAPI, HTTPException
 
 from app import db
 
+
 logger = logging.getLogger("consumer.callback_api")
 
 app = FastAPI(
@@ -20,13 +21,9 @@ def health() -> dict[str, str]:
 
 @app.post("/api/voice/callback")
 def voice_callback(payload: dict[str, Any]) -> dict[str, Any]:
-    logger.info(
-        "Received Carexpotel voice callback payload=%s",
-        payload,
-    )
+    logger.info("Received voice callback payload=%s", payload)
 
-    correlation_id = payload.get("correlationId")
-    response_data = payload.get("responseData")
+    correlation_id = payload.get("correlationId") or payload.get("correlation_id")
 
     if not correlation_id:
         raise HTTPException(
@@ -34,10 +31,15 @@ def voice_callback(payload: dict[str, Any]) -> dict[str, Any]:
             detail="correlationId is required",
         )
 
-    if not isinstance(response_data, dict):
+    callback_payload_file_path = (
+        payload.get("callbackPayloadFilePath")
+        or payload.get("callback_payload_file_path")
+    )
+
+    if not callback_payload_file_path:
         raise HTTPException(
             status_code=400,
-            detail="responseData must be an object",
+            detail="callbackPayloadFilePath is required",
         )
 
     conn = None
@@ -47,31 +49,37 @@ def voice_callback(payload: dict[str, Any]) -> dict[str, Any]:
 
         job = db.get_job_by_correlation_id(
             conn,
-            correlation_id=correlation_id,
+            correlation_id=str(correlation_id),
         )
 
         if job is None:
             raise HTTPException(
                 status_code=404,
-                detail=f"No VoiceCallJob found for correlationId={correlation_id}",
+                detail=(
+                    "No voice_bot_call_job found for "
+                    f"correlationId={correlation_id}"
+                ),
             )
 
-        db.mark_poc_completed(
+        db.complete_call_from_callback(
             conn,
-            job_id=int(job.job_id),
-            result=payload,
+            job_id=int(job["id"]),
+            callback_payload=payload,
+            callback_payload_file_path=str(callback_payload_file_path),
         )
 
         logger.info(
-            "VoiceCallJob completed from callback "
-            "job_id=%s correlation_id=%s",
-            job.job_id,
+            "Voice callback completed job_id=%s correlation_id=%s path=%s",
+            job["id"],
             correlation_id,
+            callback_payload_file_path,
         )
 
         return {
             "status": "received",
-            "correlationId": correlation_id,
+            "correlationId": str(correlation_id),
+            "jobId": int(job["id"]),
+            "callbackPayloadFilePath": str(callback_payload_file_path),
         }
 
     except HTTPException:

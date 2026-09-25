@@ -32,13 +32,13 @@ def run_once(publisher: RabbitMQPublisher) -> dict:
                     len(rows), config.QUERY_MODE, config.LEAD_DAYS)
 
         for row in rows:
-            idempotency_key = db.build_idempotency_key(row)
+            service_id = db.get_service_id(row)
             correlation_id = new_correlation_id()
 
             try:
-                should_publish = db.claim_for_publish(conn, idempotency_key, correlation_id, row)
+                should_publish = db.claim_for_publish(conn, service_id, correlation_id, row)
             except Exception:
-                logger.exception("Idempotency claim failed for key=%s", idempotency_key)
+                logger.exception("correlation_id claim failed for key=%s", correlation_id)
                 summary["failed"] += 1
                 continue
 
@@ -50,18 +50,18 @@ def run_once(publisher: RabbitMQPublisher) -> dict:
 
             try:
                 publisher.publish(message)
-                db.mark_published(conn, idempotency_key)
+                db.mark_published(conn, service_id)
                 summary["published"] += 1
                 logger.info(
-                    "Published event correlation_id=%s idempotency_key=%s carno=%s",
-                    correlation_id, idempotency_key, row["carno"],
+                    "Published event correlation_id=%s  registration_no=%s",
+                    correlation_id, row["registration_no"],
                 )
             except Exception as exc:
-                logger.exception("Publish failed for key=%s", idempotency_key)
+                logger.exception("Publish failed for key=%s", correlation_id)
                 try:
-                    db.mark_failed(conn, idempotency_key, str(exc))
+                    db.mark_failed(conn, service_id,str(exc))
                 except Exception:
-                    logger.exception("Also failed to record FAILED status for key=%s", idempotency_key)
+                    logger.exception("Also failed to record FAILED status for key=%s", correlation_id)
                 summary["failed"] += 1
 
     finally:

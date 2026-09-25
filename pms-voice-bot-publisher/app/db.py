@@ -1,186 +1,357 @@
+
 """
 Database access layer.
 
 Responsibilities:
-1. Fetch services that are due for maintenance (per QUERY_MODE / LEAD_DAYS).
-2. Provide an atomic "claim for publish" operation backed by a unique-keyed
-   tracking table (dbo.MaintenanceCallIdempotency) so the same
-   (service_id, due_maintenance_date, maintenance_type) combination never
-   triggers two voice-bot calls, even if the scheduler picks the row up on
-   more than one run.
+1. Fetch services due for maintenance.
+2. Create or reuse exactly one voice_bot_call_job per service.
+3. Prevent duplicate jobs for the same service_id.
+4. Allow a FAILED job to be retried by reusing the same row.
+5. Mark service/job state after publish success or failure.
+
+PostgreSQL version.
 """
+
 import logging
+
 import pyodbc
 
 from app.config import config
 
+
 logger = logging.getLogger("publisher.db")
 
 
+# Connection
+
 def get_connection() -> pyodbc.Connection:
-    conn = pyodbc.connect(config.db_connection_string, autocommit=False)
-    return conn
+    return pyodbc.connect(
+        config.db_connection_string,
+        autocommit=False,
+    )
 
 
-# ----------------------------------------------------------------------------
-# Fetching due services
-# ----------------------------------------------------------------------------
+# Fetch due services
 
 _BASE_SELECT = """
 SELECT
-    sr.service_id,
-    v.carno,
-    v.driver_name,
-    v.driver_phone,
-    sr.due_maintenance_date,
-    sr.maintenance_type
-FROM ServiceRecords sr
-INNER JOIN Vehicles v
-    ON v.vehicle_id = sr.vehicle_id
-WHERE sr.service_status = 'DUE'
+    vs.id AS service_id,
+    v.registration_no,
+    d.name AS driver_name,
+    d.phone AS driver_phone,
+    vs.due_maintenance_date,
+    vs.maintenance_type
+FROM public.vehicle_service vs
+INNER JOIN public.vehicle v
+    ON v.id = vs.vehicle_id
+INNER JOIN public.driver d
+    ON d.id = v.driver_id
+WHERE vs.service_status = 'DUE'
+  AND v.is_active = TRUE
 """
 
 
 def _build_query(mode: str):
-    """Returns (sql, params) for the configured QUERY_MODE."""
+    """
+    QUERY_MODE:
+        asis   -> due today or later
+        exact  -> due exactly today + LEAD_DAYS
+        window -> due today through today + LEAD_DAYS
+    """
+
     if mode == "asis":
-        # Literal query as originally specified by the business:
-        # everything due today or later, no upper bound.
-        sql = _BASE_SELECT + " AND sr.due_maintenance_date >= CAST(SYSUTCDATETIME() AS DATE);"
+        sql = _BASE_SELECT + """
+AND vs.due_maintenance_date >= CURRENT_DATE
+"""
         return sql, ()
 
     if mode == "exact":
-        # Only rows whose due date is EXACTLY today + LEAD_DAYS.
-        sql = (
-            _BASE_SELECT
-            + " AND sr.due_maintenance_date = "
-              "CAST(DATEADD(DAY, ?, SYSUTCDATETIME()) AS DATE);"
-        )
+        sql = _BASE_SELECT + """
+AND vs.due_maintenance_date =
+    CURRENT_DATE + CAST(? AS INTEGER)
+"""
         return sql, (config.LEAD_DAYS,)
 
-    # default: "window" -> due today through today + LEAD_DAYS (inclusive)
-    sql = (
-        _BASE_SELECT
-        + " AND sr.due_maintenance_date BETWEEN "
-          "CAST(SYSUTCDATETIME() AS DATE) AND "
-          "CAST(DATEADD(DAY, ?, SYSUTCDATETIME()) AS DATE);"
-    )
+    sql = _BASE_SELECT + """
+AND vs.due_maintenance_date BETWEEN
+    CURRENT_DATE
+    AND CURRENT_DATE + CAST(? AS INTEGER)
+"""
+
     return sql, (config.LEAD_DAYS,)
 
 
 def fetch_due_services(conn: pyodbc.Connection):
+    """Fetch services that are currently DUE according to QUERY_MODE."""
+
     sql, params = _build_query(config.QUERY_MODE)
+
     cursor = conn.cursor()
-    cursor.execute(sql, params) if params else cursor.execute(sql)
 
-    columns = [col[0] for col in cursor.description]
-    rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
-    cursor.close()
-    return rows
-
-
-# ----------------------------------------------------------------------------
-# Idempotency
-# ----------------------------------------------------------------------------
-
-def build_idempotency_key(row: dict) -> str:
-    due_date = row["due_maintenance_date"]
-    due_date_str = due_date.isoformat() if hasattr(due_date, "isoformat") else str(due_date)
-    return f"{row['service_id']}:{due_date_str}:{row['maintenance_type']}"
-
-
-def claim_for_publish(conn: pyodbc.Connection, idempotency_key: str,
-                       correlation_id: str, row: dict) -> bool:
-    """
-    Atomically decide whether THIS process should publish the event.
-
-    Returns True  -> caller should publish (new row, or a previous PENDING/FAILED retry)
-    Returns False -> already PUBLISHED previously, caller must skip (duplicate)
-
-    Uses UPDLOCK/HOLDLOCK so two concurrent runs (e.g. an overlapping manual
-    trigger) can't both decide to publish the same key.
-    """
-    cursor = conn.cursor()
     try:
-        cursor.execute(
-            """
-            SELECT status FROM dbo.MaintenanceCallIdempotency WITH (UPDLOCK, HOLDLOCK)
-            WHERE idempotency_key = ?
-            """,
-            idempotency_key,
+        if params:
+            cursor.execute(sql, params)
+        else:
+            cursor.execute(sql)
+
+        columns = [column[0] for column in cursor.description]
+
+        rows = [
+            dict(zip(columns, row))
+            for row in cursor.fetchall()
+        ]
+
+        logger.info(
+            "Fetched %d due service(s)",
+            len(rows),
         )
-        existing = cursor.fetchone()
 
-        if existing is None:
-            cursor.execute(
-                """
-                INSERT INTO dbo.MaintenanceCallIdempotency
-                    (idempotency_key, correlation_id, service_id, carno,
-                     maintenance_type, due_maintenance_date, status, attempt_count)
-                VALUES (?, ?, ?, ?, ?, ?, 'PENDING', 1)
-                """,
-                idempotency_key,
-                correlation_id,
-                row["service_id"],
-                row["carno"],
-                row["maintenance_type"],
-                row["due_maintenance_date"],
-            )
-            conn.commit()
-            return True
+        return rows
 
-        status = existing[0]
-        if status == "PUBLISHED":
-            conn.commit()  # release the lock, nothing else to do
-            logger.info("Skipping duplicate, already PUBLISHED: %s", idempotency_key)
-            return False
-
-        # PENDING or FAILED -> allow a retry, refresh the correlation id
-        cursor.execute(
-            """
-            UPDATE dbo.MaintenanceCallIdempotency
-            SET attempt_count = attempt_count + 1,
-                correlation_id = ?,
-                updated_at = SYSUTCDATETIME()
-            WHERE idempotency_key = ?
-            """,
-            correlation_id,
-            idempotency_key,
-        )
-        conn.commit()
-        return True
-
-    except Exception:
-        conn.rollback()
-        raise
     finally:
         cursor.close()
 
 
-def mark_published(conn: pyodbc.Connection, idempotency_key: str) -> None:
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        UPDATE dbo.MaintenanceCallIdempotency
-        SET status = 'PUBLISHED', updated_at = SYSUTCDATETIME(), last_error = NULL
-        WHERE idempotency_key = ?
-        """,
-        idempotency_key,
-    )
-    conn.commit()
-    cursor.close()
+# Service ID
+
+def get_service_id(row: dict) -> int:
+    return int(row["service_id"])
 
 
-def mark_failed(conn: pyodbc.Connection, idempotency_key: str, error_message: str) -> None:
+# Claim for publish
+
+def claim_for_publish(
+    conn: pyodbc.Connection,
+    service_id: int,
+    correlation_id: str,
+    row: dict,
+) -> bool:
+    """
+    Ensure only one voice_bot_call_job exists for a service.
+
+    If service_id already exists:
+        -> do nothing
+        -> return False
+
+    If service_id does not exist:
+        -> insert one PENDING job
+        -> return True
+
+    The UNIQUE constraint/index on service_id protects against
+    concurrent inserts.
+    """
+
     cursor = conn.cursor()
-    cursor.execute(
-        """
-        UPDATE dbo.MaintenanceCallIdempotency
-        SET status = 'FAILED', updated_at = SYSUTCDATETIME(), last_error = ?
-        WHERE idempotency_key = ?
-        """,
-        error_message[:1000],
-        idempotency_key,
-    )
-    conn.commit()
-    cursor.close()
+
+    try:
+        cursor.execute(
+            """
+            SELECT id
+            FROM public.voice_bot_call_job
+            WHERE service_id = ?
+            LIMIT 1
+            """,
+            service_id,
+        )
+
+        existing = cursor.fetchone()
+
+        if existing is not None:
+            job_id = existing[0]
+
+            conn.commit()
+
+            logger.info(
+                "Skipping service_id=%s because job_id=%s already exists",
+                service_id,
+                job_id,
+            )
+
+            return False
+
+        cursor.execute(
+            """
+            INSERT INTO public.voice_bot_call_job
+            (
+                service_id,
+                correlation_id,
+                job_status,
+                callback_received,
+                callback_payload_file_path
+            )
+            VALUES
+            (
+                ?,
+                ?,
+                'PENDING',
+                FALSE,
+                NULL
+            )
+            RETURNING id
+            """,
+            service_id,
+            correlation_id,
+        )
+
+        inserted = cursor.fetchone()
+
+        conn.commit()
+
+        logger.info(
+            "Created voice_bot_call_job: "
+            "service_id=%s job_id=%s correlation_id=%s",
+            service_id,
+            inserted[0],
+            correlation_id,
+        )
+
+        return True
+
+    except Exception:
+        conn.rollback()
+
+        logger.exception(
+            "Failed to create/check job for service_id=%s",
+            service_id,
+        )
+
+        raise
+
+    finally:
+        cursor.close()
+
+
+# Mark published
+
+def mark_published(
+    conn: pyodbc.Connection,
+    service_id: int,
+) -> None:
+    """
+    When the call job is COMPLETED:
+        service_status = BOOKED
+        call_attempts = call_attempts + 1
+    """
+
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute(
+            """
+            SELECT job_status
+            FROM public.voice_bot_call_job
+            WHERE service_id = ?
+            """,
+            service_id,
+        )
+
+        existing = cursor.fetchone()
+
+        if existing is None:
+            logger.warning(
+                "No voice_bot_call_job found for service_id=%s",
+                service_id,
+            )
+            return
+
+        status = existing[0]
+
+        if status == "COMPLETED":
+            cursor.execute(
+                """
+                UPDATE public.vehicle_service
+                SET
+                    service_status = 'BOOKED',
+                    call_attempts = call_attempts + 1
+                WHERE id = ?
+                """,
+                service_id,
+            )
+
+            conn.commit()
+
+            logger.info(
+                "Service completed and marked BOOKED: service_id=%s",
+                service_id,
+            )
+
+        else:
+            conn.commit()
+
+            logger.info(
+                "Service_id=%s job status=%s; no completion update",
+                service_id,
+                status,
+            )
+
+    except Exception:
+        conn.rollback()
+
+        logger.exception(
+            "Failed to mark service_id=%s as BOOKED",
+            service_id,
+        )
+
+        raise
+
+    finally:
+        cursor.close()
+
+
+# Mark failed
+
+def mark_publish_failed(
+    conn: pyodbc.Connection,
+    service_id: int,
+    error_message: str,
+) -> None:
+    """
+    The publisher failed to send the RabbitMQ message.
+
+    Since the message was never successfully published, remove the
+    pending job record so the next scheduler run can create a new one.
+
+    This is not a voice-bot job failure.
+    """
+
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute(
+            """
+            DELETE FROM public.voice_bot_call_job
+            WHERE service_id = ?
+            """,
+            service_id,
+        )
+
+        cursor.execute(
+            """
+            UPDATE public.vehicle_service
+            SET service_status = 'DUE'
+            WHERE id = ?
+            """,
+            service_id,
+        )
+
+        conn.commit()
+
+        logger.error(
+            "Publisher failed for service_id=%s. "
+            "Job removed so it can be retried: %s",
+            service_id,
+            error_message,
+        )
+
+    except Exception:
+        conn.rollback()
+
+        logger.exception(
+            "Failed to handle publisher failure for service_id=%s",
+            service_id,
+        )
+
+        raise
+
+    finally:
+        cursor.close()

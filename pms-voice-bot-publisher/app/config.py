@@ -14,16 +14,14 @@ def _get_bool(name: str, default: bool) -> bool:
 
 
 class Config:
-    # ---------------- SQL Server ----------------
-    DB_SERVER = os.getenv("DB_SERVER")
-    DB_PORT = os.getenv("DB_PORT")
-    DB_NAME = os.getenv("DB_NAME")
-    DB_USER = os.getenv("DB_USER")
+    # ---------------- PostgreSQL ----------------
+    DB_HOST = os.getenv("DB_HOST", "localhost")
+    DB_PORT = os.getenv("DB_PORT", "5432")
+    DB_NAME = os.getenv("DB_NAME", "dev-voice-db")
+    DB_USER = os.getenv("DB_USER", "postgres")
     DB_PASSWORD = os.getenv("DB_PASSWORD")
-    DB_DRIVER = os.getenv("DB_DRIVER")
-    DB_ENCRYPT = os.getenv("DB_ENCRYPT")
-    DB_TRUST_SERVER_CERTIFICATE = os.getenv("DB_TRUST_SERVER_CERTIFICATE")
-    DB_CONN_TIMEOUT = int(os.getenv("DB_CONN_TIMEOUT",10))
+    DB_DRIVER = os.getenv("DB_DRIVER", "PostgreSQL Unicode(x64)")
+    DB_CONN_TIMEOUT = int(os.getenv("DB_CONN_TIMEOUT", "10"))
 
     # ---------------- RabbitMQ ----------------
     RABBITMQ_URL = os.getenv("RABBITMQ_URL", "amqp://guest:guest@rabbitmq:5672/%2F")
@@ -41,7 +39,7 @@ class Config:
     QUERY_MODE = os.getenv("QUERY_MODE", "window")
     LEAD_DAYS = int(os.getenv("LEAD_DAYS", "2"))
 
-    # ---------------- Scheduling ----------------
+    # ---------------- Scheduling ---------------S-
     # RUN_MODE:
     #   "loop" -> stays alive, runs on an interval (good for docker-compose / always-on worker)
     #   "once" -> runs a single pass and exits 0 (good for an external cron / Kubernetes CronJob)
@@ -60,12 +58,11 @@ class Config:
     def db_connection_string(self) -> str:
         return (
             f"DRIVER={{{self.DB_DRIVER}}};"
-            f"SERVER={self.DB_SERVER},{self.DB_PORT};"
+            f"SERVER={self.DB_HOST};"
+            f"PORT={self.DB_PORT};"
             f"DATABASE={self.DB_NAME};"
             f"UID={self.DB_USER};"
             f"PWD={self.DB_PASSWORD};"
-            f"Encrypt={self.DB_ENCRYPT};"
-            f"TrustServerCertificate={self.DB_TRUST_SERVER_CERTIFICATE};"
             f"Connection Timeout={self.DB_CONN_TIMEOUT};"
         )
 

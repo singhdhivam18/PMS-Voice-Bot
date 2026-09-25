@@ -5,7 +5,6 @@ import httpx
 
 from app.config import config
 
-
 logger = logging.getLogger("consumer.voice_agent")
 
 
@@ -14,31 +13,26 @@ class VoiceAgentError(RuntimeError):
 
 
 class VoiceAgent:
-
     def trigger_call(
         self,
         *,
         correlation_id: str,
-        idempotency_key: str,
         service_id: int,
-        carno: str,
+        registration_no: str,
         driver_name: str,
         driver_phone: str,
         due_maintenance_date: str,
         maintenance_type: str,
     ) -> dict[str, Any]:
-
         payload = {
             "driver_name": driver_name,
             "driver_phone": driver_phone,
-            "car_number": carno,
+            "car_number": registration_no,
             "due_date": due_maintenance_date,
             "depot_name": config.VOICE_AGENT_DEPOT_NAME,
             "correlation_id": correlation_id,
             "callback_url": config.VOICE_AGENT_CALLBACK_URL,
-
             "service_id": service_id,
-            "idempotency_key": idempotency_key,
             "maintenance_type": maintenance_type,
         }
 
@@ -49,9 +43,9 @@ class VoiceAgent:
 
         logger.info(
             "Starting Voice Agent outbound call "
-            "correlation_id=%s idempotency_key=%s url=%s",
+            "correlation_id=%s service_id=%s url=%s",
             correlation_id,
-            idempotency_key,
+            service_id,
             url,
         )
 
@@ -61,68 +55,46 @@ class VoiceAgent:
                 json=payload,
                 timeout=config.VOICE_AGENT_TIMEOUT,
             )
-
         except httpx.ConnectError as exc:
-            logger.exception(
-                "Could not connect to Carexpotel Voice Agent url=%s",
-                url,
-            )
+            logger.exception("Could not connect to Voice Agent url=%s", url)
             raise VoiceAgentError(
-                f"Could not connect to Carexpotel at {url}"
+                f"Could not connect to Voice Agent at {url}"
             ) from exc
-
         except httpx.TimeoutException as exc:
             logger.exception(
-                "Carexpotel request timed out url=%s timeout=%s",
+                "Voice Agent request timed out url=%s timeout=%s",
                 url,
                 config.VOICE_AGENT_TIMEOUT,
             )
             raise VoiceAgentError(
                 "Voice Agent API request timed out"
             ) from exc
-
         except httpx.HTTPError as exc:
-            logger.exception(
-                "Carexpotel HTTP request failed url=%s",
-                url,
-            )
+            logger.exception("Voice Agent HTTP request failed url=%s", url)
             raise VoiceAgentError(
                 f"Voice Agent API request failed: {exc}"
             ) from exc
 
         logger.info(
-            "Carexpotel response status=%s correlation_id=%s",
+            "Voice Agent response status=%s correlation_id=%s",
             response.status_code,
             correlation_id,
         )
 
         try:
             result = response.json()
-
         except ValueError as exc:
-            logger.error(
-                "Carexpotel returned non-JSON response: %s",
-                response.text,
-            )
+            logger.error("Voice Agent returned non-JSON response: %s", response.text)
             raise VoiceAgentError(
                 "Voice Agent API returned invalid JSON"
             ) from exc
 
-        logger.info(
-            "Carexpotel response body=%s",
-            result,
-        )
-
         if response.status_code >= 400:
             raise VoiceAgentError(
-                f"Voice Agent API returned HTTP "
-                f"{response.status_code}: {result}"
+                f"Voice Agent API returned HTTP {response.status_code}: {result}"
             )
 
-        status = str(
-            result.get("status") or ""
-        ).strip().lower()
-
+        status = str(result.get("status") or "").strip().lower()
         if status != "call_initiated":
             raise VoiceAgentError(
                 f"Voice Agent call was not initiated: {result}"

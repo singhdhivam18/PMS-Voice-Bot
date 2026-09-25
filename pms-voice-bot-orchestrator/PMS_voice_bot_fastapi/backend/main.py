@@ -63,7 +63,7 @@ class OutboundCallRequest(BaseModel):
     depot_name: str = Field(min_length=1)
     correlation_id: str = Field(min_length=1)
     callback_url: str | None = None
-
+    preferred_language: str = Field(default="en", min_length=2)
     service_id: int | None = None
     idempotency_key: str | None = None
     maintenance_type: str | None = None
@@ -224,6 +224,78 @@ def config() -> dict[str, Any]:
         ),
         "defaults": DEFAULTS,
     }
+SUPPORTED_LANGUAGES = {
+    "en": "English",
+    "hi": "Hindi",
+    "kn": "Kannada",
+    "ta": "Tamil",
+    "te": "Telugu",
+    "ml": "Malayalam",
+}
+FIRST_MESSAGE_TEMPLATES = {
+    "en": (
+        "Hi {driver_name}, this is Subha from Dheeraj's service team. "
+        "I'm calling about a PMS reminder for your car {car_number}. "
+        "The PMS is due on {due_date}. "
+        "Would you like to book an appointment?"
+    ),
+
+    "hi": (
+        "नमस्ते {driver_name}, मैं Dheeraj की सर्विस टीम से Subha बोल रहा हूँ। "
+        "आपकी कार {car_number} की PMS सर्विस {due_date} को due है। "
+        "क्या आप इसका appointment book करना चाहेंगे?"
+    ),
+
+    "kn": (
+        "ನಮಸ್ಕಾರ {driver_name}, ನಾನು Dheeraj ಸರ್ವಿಸ್ ಟೀಮ್‌ನಿಂದ Subha ಮಾತನಾಡುತ್ತಿದ್ದೇನೆ. "
+        "ನಿಮ್ಮ ಕಾರ್ {car_number}ಗೆ PMS ಸರ್ವಿಸ್ {due_date}ರಂದು due ಇದೆ. "
+        "ನೀವು appointment book ಮಾಡಿಕೊಳ್ಳುತ್ತೀರಾ?"
+    ),
+
+    "ta": (
+        "வணக்கம் {driver_name}, நான் Dheeraj சர்வீஸ் டீம்ல இருந்து Subha பேசுறேன். "
+        "உங்க கார் {car_number}க்கு PMS சர்வீஸ் {due_date} அன்று due இருக்கு. "
+        "Appointment book பண்ணிக்கலாமா?"
+    ),
+
+    "te": (
+        "నమస్కారం {driver_name}, నేను Dheeraj సర్వీస్ టీమ్ నుంచి Subha మాట్లాడుతున్నాను. "
+        "మీ కార్ {car_number}కి PMS సర్వీస్ {due_date}న due ఉంది. "
+        "Appointment book చేయాలనుకుంటున్నారా?"
+    ),
+
+    "ml": (
+        "നമസ്കാരം {driver_name}, ഞാൻ Dheeraj സർവീസ് ടീമിൽ നിന്ന് Subha ആണ് സംസാരിക്കുന്നത്. "
+        "നിങ്ങളുടെ കാർ {car_number}ന്റെ PMS സർവീസ് {due_date}ന് due ആണ്. "
+        "Appointment book ചെയ്യണോ?"
+    ),
+}
+def normalize_language(value: str | None) -> str:
+    language = (value or "").strip().lower()
+
+    if language not in SUPPORTED_LANGUAGES:
+        logger.warning(
+            "Unsupported preferred_language=%r. Falling back to English.",
+            value,
+        )
+        return "en"
+
+    return language
+
+
+def build_first_message(
+    language: str,
+    driver_name: str,
+    car_number: str,
+    due_date: str,
+) -> str:
+    template = FIRST_MESSAGE_TEMPLATES[language]
+
+    return template.format(
+        driver_name=driver_name,
+        car_number=car_number,
+        due_date=due_date,
+    )
 
 @app.post("/api/outbound-call")
 async def outbound_call(request: OutboundCallRequest) -> dict[str, Any]:
@@ -241,6 +313,29 @@ async def outbound_call(request: OutboundCallRequest) -> dict[str, Any]:
 
     # These names intentionally match the existing ElevenLabs agent placeholders.
     # ElevenLabs dynamic variable names are case-sensitive.
+    preferred_language = normalize_language(
+    request.preferred_language
+    )
+
+    first_message = build_first_message(
+        language=preferred_language,
+        driver_name=request.driver_name,
+        car_number=request.car_number,
+        due_date=request.due_date,
+    )
+    logger.info(
+    "Call language configuration: "
+    "correlation_id=%s language=%s driver=%s car=%s",
+    request.correlation_id,
+    preferred_language,
+    request.driver_name,
+    request.car_number,
+    )
+    logger.info(
+    "First message selected for language=%s: %s",
+    preferred_language,
+    first_message,
+    )
     dynamic_variables = {
         "Driver_Name": request.driver_name,
         "Car_Registration_Number": request.car_number,
@@ -248,17 +343,30 @@ async def outbound_call(request: OutboundCallRequest) -> dict[str, Any]:
         "driver_phone": request.driver_phone,
         "depot_name": request.depot_name,
         "correlation_id": request.correlation_id,
+
+        # Important: keep this as a dynamic variable too.
+        "preferred_language": preferred_language,
     }
 
     payload = {
         "agent_id": agent_id,
         "agent_phone_number_id": agent_phone_number_id,
         "to_number": request.driver_phone,
+
         "conversation_initiation_client_data": {
             "dynamic_variables": dynamic_variables,
+
+            "conversation_config_override": {
+                "agent": {
+                    "language": preferred_language,
+                    "first_message": first_message,
+                }
+            },
         },
+
         "call_recording_enabled": os.getenv(
-            "ELEVENLABS_CALL_RECORDING_ENABLED", "false"
+            "ELEVENLABS_CALL_RECORDING_ENABLED",
+            "false",
         ).lower() == "true",
     }
 
@@ -486,10 +594,11 @@ async def elevenlabs_post_call(
                 or os.getenv("CALLBACK_URL", "").strip()
                 or None
             )
-
+            path = call_file_path(str(car_number), correlation_id)
             callback_result = await send_consumer_callback(
                 callback_url=callback_url,
-                final_response=final_response,
+                path=path,
+                correlation_id=str(correlation_id or existing.get("correlation_id") or ""),
             )
 
             payload["callback_url"] = callback_url
@@ -727,7 +836,8 @@ async def call_gemini_for_appointment(
     return extracted
 async def send_consumer_callback(
     callback_url: str | None,
-    final_response: dict[str, Any],
+    path: Path,
+    correlation_id: str,
 ) -> dict[str, Any] | None:
 
     if not callback_url:
@@ -741,7 +851,10 @@ async def send_consumer_callback(
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(
                 callback_url,
-                json=final_response,
+                json={
+                    "correlationId": str(correlation_id),
+                    "callbackPayloadFilePath": str(path),
+                },
                 headers={
                     "Content-Type": "application/json",
                 },

@@ -1,0 +1,119 @@
+version: "3.9"
+
+services:
+  # ---------------------------------------------------------------------
+  # PostgreSQL
+  # ---------------------------------------------------------------------
+  postgres:
+    image: postgres:16
+    container_name: car-service-postgres
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_DB: dev-voice-db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+
+    ports:
+      - "5432:5432"
+
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+      # Run automatically on first database initialization
+      - ./database/02_create_schema.sql:/docker-entrypoint-initdb.d/02_create_schema.sql:ro
+      - ./database/03_master_data.sql:/docker-entrypoint-initdb.d/03_master_data.sql:ro
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d dev-voice-db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+    networks:
+      - car-service-net
+
+  # ---------------------------------------------------------------------
+  # RabbitMQ
+  # ---------------------------------------------------------------------
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    container_name: car-service-rabbitmq
+    restart: unless-stopped
+
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+
+    networks:
+      - car-service-net
+
+  # ---------------------------------------------------------------------
+  # Publisher Worker
+  # ---------------------------------------------------------------------
+  publisher-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: car-service-publisher-worker
+    restart: unless-stopped
+
+    env_file:
+      - .env
+
+    environment:
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/%2F
+
+      # PostgreSQL connection
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: dev-voice-db
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+
+      # If your application uses a single DATABASE_URL instead,
+      # use this instead of the DB_* variables:
+      # DATABASE_URL: postgresql://postgres:postgres@postgres:5432/dev-voice-db
+
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+      postgres:
+        condition: service_healthy
+
+    ports:
+      - "8080:8080"
+
+    networks:
+      - car-service-net
+
+
+# -----------------------------------------------------------------------
+# Networks
+# -----------------------------------------------------------------------
+networks:
+  car-service-net:
+    driver: bridge
+
+
+# -----------------------------------------------------------------------
+# Volumes
+# -----------------------------------------------------------------------
+volumes:
+  rabbitmq_data:
+  postgres_data:

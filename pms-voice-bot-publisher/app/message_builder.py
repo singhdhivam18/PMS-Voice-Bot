@@ -3,7 +3,7 @@ Builds the outbound event payload published to RabbitMQ.
 """
 import uuid
 
-from app.db import build_idempotency_key
+#from app.db import build_idempotency_key
 
 EVENT_NAME = "maintenance_call_requested"
 EVENT_VERSION = 1
@@ -21,10 +21,9 @@ def build_message(row: dict, correlation_id: str) -> dict:
         "event": EVENT_NAME,
         "version": EVENT_VERSION,
         "correlation_id": correlation_id,
-        "idempotency_key": build_idempotency_key(row),
         "data": {
             "service_id": row["service_id"],
-            "carno": row["carno"],
+            "registration_no": row["registration_no"],
             "driver_name": row["driver_name"],
             "driver_phone": row["driver_phone"],
             "due_maintenance_date": due_date_str,
