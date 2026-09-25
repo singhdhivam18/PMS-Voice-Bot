@@ -36,7 +36,7 @@ def run_once(publisher: RabbitMQPublisher) -> dict:
             correlation_id = new_correlation_id()
 
             try:
-                should_publish = db.claim_for_publish(conn, service_id, correlation_id, row)
+                job_id,should_publish = db.claim_for_publish(conn, service_id, correlation_id, row)
             except Exception:
                 logger.exception("correlation_id claim failed for key=%s", correlation_id)
                 summary["failed"] += 1
@@ -50,7 +50,7 @@ def run_once(publisher: RabbitMQPublisher) -> dict:
 
             try:
                 publisher.publish(message)
-                db.mark_published(conn, service_id)
+                db.mark_published(conn, job_id=job_id)
                 summary["published"] += 1
                 logger.info(
                     "Published event correlation_id=%s  registration_no=%s",

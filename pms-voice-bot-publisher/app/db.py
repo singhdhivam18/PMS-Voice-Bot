@@ -150,7 +150,7 @@ def claim_for_publish(
     try:
         cursor.execute(
             """
-            SELECT id
+            SELECT id,job_status
             FROM public.voice_bot_call_job
             WHERE service_id = ?
             LIMIT 1
@@ -159,11 +159,26 @@ def claim_for_publish(
         )
 
         existing = cursor.fetchone()
-
         if existing is not None:
             job_id = existing[0]
+            job_status=existing[1]
+            if job_status == "FAILED":
+                cursor.execute(
+                    """
+                    UPDATE public.voice_bot_call_job
+                    SET
+                        correlation_id = ?,
+                        job_status = 'PENDING',
+                        callback_received = FALSE,
+                        callback_payload_file_path = NULL,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    correlation_id,
+                    job_id,
+                )
 
-            conn.commit()
+                conn.commit()
 
             logger.info(
                 "Skipping service_id=%s because job_id=%s already exists",
@@ -209,7 +224,7 @@ def claim_for_publish(
             correlation_id,
         )
 
-        return True
+        return True,job_id
 
     except Exception:
         conn.rollback()
@@ -228,122 +243,143 @@ def claim_for_publish(
 # Mark published
 
 def mark_published(
-    conn: pyodbc.Connection,
-    service_id: int,
+    conn,
+    *,
+    job_id: int,
 ) -> None:
-    """
-    When the call job is COMPLETED:
-        service_status = BOOKED
-        call_attempts = call_attempts + 1
-    """
 
     cursor = conn.cursor()
 
     try:
         cursor.execute(
             """
-            SELECT job_status
-            FROM public.voice_bot_call_job
-            WHERE service_id = ?
+            UPDATE public.voice_bot_call_job
+            SET
+                job_status = 'Proccessing',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
             """,
-            service_id,
+            job_id,
         )
 
-        existing = cursor.fetchone()
-
-        if existing is None:
-            logger.warning(
-                "No voice_bot_call_job found for service_id=%s",
-                service_id,
-            )
-            return
-
-        status = existing[0]
-
-        if status == "COMPLETED":
-            cursor.execute(
-                """
-                UPDATE public.vehicle_service
-                SET
-                    service_status = 'BOOKED',
-                    call_attempts = call_attempts + 1
-                WHERE id = ?
-                """,
-                service_id,
+        if cursor.rowcount != 1:
+            raise RuntimeError(
+                f"voice_bot_call_job not found: job_id={job_id}"
             )
 
-            conn.commit()
-
-            logger.info(
-                "Service completed and marked BOOKED: service_id=%s",
-                service_id,
+        cursor.execute(
+            """
+            INSERT INTO public.voice_bot_call_job_event
+            (
+                job_id,
+                event_status,
+                system_message
             )
-
-        else:
-            conn.commit()
-
-            logger.info(
-                "Service_id=%s job status=%s; no completion update",
-                service_id,
-                status,
+            VALUES
+            (
+                ?,
+                'PUBLISHED',
+                'Maintenance call event published to RabbitMQ successfully.'
             )
+            """,
+            job_id,
+        )
+
+        conn.commit()
 
     except Exception:
         conn.rollback()
-
-        logger.exception(
-            "Failed to mark service_id=%s as BOOKED",
-            service_id,
-        )
-
         raise
 
     finally:
         cursor.close()
-
-
 # Mark failed
 
 def mark_publish_failed(
-    conn: pyodbc.Connection,
-    service_id: int,
+    conn,
+    *,
+    job_id: int,
     error_message: str,
 ) -> None:
     """
-    The publisher failed to send the RabbitMQ message.
+    RabbitMQ publish failed.
 
-    Since the message was never successfully published, remove the
-    pending job record so the next scheduler run can create a new one.
+    Keep the existing voice_bot_call_job row so the same job_id
+    can be reused on the next retry.
 
-    This is not a voice-bot job failure.
+    Update:
+        job_status -> FAILED
+        PUBLISHED event -> NOT_PUBLISHED
     """
 
     cursor = conn.cursor()
 
     try:
+        # Update the latest PUBLISHED event for this job.
         cursor.execute(
             """
-            DELETE FROM public.voice_bot_call_job
-            WHERE service_id = ?
+            UPDATE public.voice_bot_call_job_event
+            SET
+                event_status = 'NOT_PUBLISHED',
+                system_message = ?,
+                event_occurred_at = CURRENT_TIMESTAMP
+            WHERE id = (
+                SELECT id
+                FROM public.voice_bot_call_job_event
+                WHERE job_id = ?
+                  AND event_status = 'PUBLISHED'
+                ORDER BY id DESC
+                LIMIT 1
+            )
             """,
-            service_id,
+            error_message[:500],
+            job_id,
         )
 
+        if cursor.rowcount != 1:
+            logger.warning(
+                "No PUBLISHED event found for job_id=%s",
+                job_id,
+            )
+
+        # Keep the job row and make it retryable.
+        cursor.execute(
+            """
+            UPDATE public.voice_bot_call_job
+            SET
+                job_status = 'FAILED',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            job_id,
+        )
+
+        if cursor.rowcount != 1:
+            raise RuntimeError(
+                f"voice_bot_call_job not found: job_id={job_id}"
+            )
+
+        # Service remains due.
         cursor.execute(
             """
             UPDATE public.vehicle_service
-            SET service_status = 'DUE'
-            WHERE id = ?
+            SET
+                service_status = 'DUE'
+            WHERE id = (
+                SELECT service_id
+                FROM public.voice_bot_call_job
+                WHERE id = ?
+            )
             """,
-            service_id,
+            job_id,
         )
 
         conn.commit()
 
         logger.error(
-            "Publisher failed for service_id=%s. "
-            "Job removed so it can be retried: %s",
-            service_id,
+            "RabbitMQ publish failed: job_id=%s "
+            "event=NOT_PUBLISHED error=%s",
+            job_id,
             error_message,
         )
 
@@ -351,10 +387,69 @@ def mark_publish_failed(
         conn.rollback()
 
         logger.exception(
-            "Failed to handle publisher failure for service_id=%s",
-            service_id,
+            "Failed to mark publish failure for job_id=%s",
+            job_id,
         )
 
+        raise
+
+    finally:
+        cursor.close()
+
+def insert_job_event(
+    conn,
+    *,
+    job_id: int,
+    event_status: str,
+    system_message: str,
+) -> int:
+
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute(
+            """
+            INSERT INTO public.voice_bot_call_job_event
+            (
+                job_id,
+                event_status,
+                system_message
+            )
+            VALUES
+            (
+                ?,
+                ?,
+                ?
+            )
+            RETURNING id
+            """,
+            job_id,
+            event_status,
+            system_message[:500],
+        )
+
+        row = cursor.fetchone()
+
+        if row is None:
+            raise RuntimeError(
+                f"Failed to insert event for job_id={job_id}"
+            )
+
+        event_id = int(row[0])
+
+        conn.commit()
+
+        logger.info(
+            "Inserted job event event_id=%s job_id=%s status=%s",
+            event_id,
+            job_id,
+            event_status,
+        )
+
+        return event_id
+
+    except Exception:
+        conn.rollback()
         raise
 
     finally:

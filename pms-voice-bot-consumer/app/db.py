@@ -132,7 +132,7 @@ def complete_call_from_callback(
             """
             UPDATE public.voice_bot_call_job_event
             SET
-                event_status = 'COMPLETED',
+                event_status = 'Call_success',
                 system_message = %s,
                 event_occurred_at = CURRENT_TIMESTAMP
             WHERE id = (
@@ -179,3 +179,31 @@ def complete_call_from_callback(
         job_id,
         event_row[0],
     )
+def  complete_call_from_callback_failed(conn,job_id):
+     callback_message="call_intiated failed"
+     with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE public.voice_bot_call_job_event
+                SET
+                    event_status = 'Call_error',
+                    system_message = %s,
+                    event_occurred_at = CURRENT_TIMESTAMP
+                WHERE id = (
+                    SELECT id
+                    FROM public.voice_bot_call_job_event
+                    WHERE job_id = %s
+                      AND event_status = 'CALL_INITIATED'
+                    ORDER BY id DESC
+                    LIMIT 1
+                )
+                RETURNING id
+                """,
+                (callback_message[:500], job_id),
+            )
+            event_row = cursor.fetchone()
+    
+            if event_row is None:
+                raise RuntimeError(
+                    f"No CALL_INITIATED event found for job_id={job_id}"
+                )

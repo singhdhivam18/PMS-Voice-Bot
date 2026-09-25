@@ -23,6 +23,7 @@ class VoiceAgent:
         driver_phone: str,
         due_maintenance_date: str,
         maintenance_type: str,
+        preferred_language:str,
     ) -> dict[str, Any]:
         payload = {
             "driver_name": driver_name,
@@ -34,6 +35,7 @@ class VoiceAgent:
             "callback_url": config.VOICE_AGENT_CALLBACK_URL,
             "service_id": service_id,
             "maintenance_type": maintenance_type,
+            "preferred_language":preferred_language,
         }
 
         url = (

@@ -95,12 +95,11 @@ def voice_callback(payload: dict[str, Any]) -> dict[str, Any]:
             "Failed processing voice callback correlation_id=%s",
             correlation_id,
         )
-
+        db.complete_call_from_callback_failed(conn=conn,job_id=int(job["id"]))
         raise HTTPException(
             status_code=500,
             detail=f"Callback processing failed: {exc}",
         ) from exc
-
     finally:
         if conn is not None:
             conn.close()
