@@ -39,6 +39,7 @@ SELECT
     v.registration_no,
     d.name AS driver_name,
     d.phone AS driver_phone,
+    l.code AS preferred_language,
     vs.due_maintenance_date,
     vs.maintenance_type
 FROM public.vehicle_service vs
@@ -46,8 +47,11 @@ INNER JOIN public.vehicle v
     ON v.id = vs.vehicle_id
 INNER JOIN public.driver d
     ON d.id = v.driver_id
+INNER JOIN public.language l
+    ON l.id = d.preferred_language_id
 WHERE vs.service_status = 'DUE'
   AND v.is_active = TRUE
+  AND d.do_not_call = FALSE
 """
 
 

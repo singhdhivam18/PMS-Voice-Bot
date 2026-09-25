@@ -28,5 +28,6 @@ def build_message(row: dict, correlation_id: str) -> dict:
             "driver_phone": row["driver_phone"],
             "due_maintenance_date": due_date_str,
             "maintenance_type": row["maintenance_type"],
+            "preferred_language": row["preferred_language"],
         },
     }
