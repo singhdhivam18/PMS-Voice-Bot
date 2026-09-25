@@ -74,7 +74,7 @@ def consume():
             driver_phone = data["driver_phone"]
             due_maintenance_date = data["due_maintenance_date"]
             maintenance_type = data["maintenance_type"]
-
+            preferred_language=data["preferred_language"]
             logger.info(
                 "Received RabbitMQ message event=%s version=%s "
                 "correlation_id=%s service_id=%s",
@@ -111,6 +111,7 @@ def consume():
                 driver_phone=driver_phone,
                 due_maintenance_date=due_maintenance_date,
                 maintenance_type=maintenance_type,
+                preferred_language=preferred_language,
             )
 
             # Persist the event only after the voice API confirms initiation.

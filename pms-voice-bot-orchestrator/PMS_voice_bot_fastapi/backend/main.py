@@ -65,7 +65,6 @@ class OutboundCallRequest(BaseModel):
     callback_url: str | None = None
     preferred_language: str = Field(default="en", min_length=2)
     service_id: int | None = None
-    idempotency_key: str | None = None
     maintenance_type: str | None = None
 
 class AIExtractionRequest(BaseModel):
@@ -109,7 +108,7 @@ def get_dynamic(dynamic_variables: dict[str, Any], *keys: str, default: Any = No
     """Return the first present dynamic variable key. ElevenLabs names are case-sensitive."""
     for key in keys:
         if key in dynamic_variables and dynamic_variables[key] not in (None, ""):
-            return dynamic_variables[key]
+            return dynamic_variables[key] 
     return default
 
 def verify_elevenlabs_signature(
