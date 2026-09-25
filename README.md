@@ -1260,4 +1260,11 @@ pms-voice-bot-consumer/README.md
 pms-voice-bot-orchestrator/README.md
 ```
 
+docker compose run cmd
+```
+docker compose down -v
+docker compose up -d
+python pms-voice-bot-testing/init_test_data.py
+```
+
 The root `README.md` is the primary document for complete end-to-end setup and execution.
