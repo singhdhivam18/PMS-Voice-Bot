@@ -69,44 +69,44 @@ def get_job_by_correlation_id(conn, correlation_id: str):
 def insert_call_initiated_event(
     conn,
     *,
-    job_id: int,
+    event_id: int,
     system_message: str,
 ) -> int:
     with conn.cursor() as cursor:
         cursor.execute(
             """
-            INSERT INTO public.voice_bot_call_job_event
-            (
-                job_id,
-                event_status,
-                system_message
-            )
-            VALUES
-            (
-                %s,
-                'CALL_INITIATED',
-                %s
-            )
+            UPDATE public.voice_bot_call_job_event
+            SET
+                event_status = 'CALL_INITIATED',
+                system_message = %s,
+                event_occurred_at = CURRENT_TIMESTAMP
+            WHERE id = %s
             RETURNING id
             """,
-            (job_id, system_message[:500]),
+            (
+                system_message[:500],
+                event_id,
+            ),
         )
+
         row = cursor.fetchone()
 
     if row is None:
         raise RuntimeError(
-            f"Failed to insert CALL_INITIATED event for job_id={job_id}"
+            f"Failed to update event to CALL_INITIATED "
+            f"for event_id={event_id}"
         )
 
     conn.commit()
-    event_id = int(row[0])
+
+    updated_event_id = int(row[0])
 
     logger.info(
-        "Inserted CALL_INITIATED event event_id=%s job_id=%s",
-        event_id,
-        job_id,
+        "Updated CALL_INITIATED event event_id=%s",
+        updated_event_id,
     )
-    return event_id
+
+    return updated_event_id
 
 
 def complete_call_from_callback(
@@ -116,8 +116,10 @@ def complete_call_from_callback(
     callback_payload: dict[str, Any],
     callback_payload_file_path: str,
 ) -> None:
-    """Complete the latest initiated event and update the existing job."""
+    """Update CALL_INITIATED to CALL_SUCCESS after callback."""
+
     response_data = callback_payload.get("responseData")
+
     callback_message = "Voice call callback received successfully."
 
     if isinstance(response_data, dict):
@@ -128,11 +130,13 @@ def complete_call_from_callback(
         )
 
     with conn.cursor() as cursor:
+
+        # CALL_INITIATED -> CALL_SUCCESS
         cursor.execute(
             """
             UPDATE public.voice_bot_call_job_event
             SET
-                event_status = 'Call_success',
+                event_status = 'CALL_SUCCESS',
                 system_message = %s,
                 event_occurred_at = CURRENT_TIMESTAMP
             WHERE id = (
@@ -145,8 +149,12 @@ def complete_call_from_callback(
             )
             RETURNING id
             """,
-            (callback_message[:500], job_id),
+            (
+                callback_message[:500],
+                job_id,
+            ),
         )
+
         event_row = cursor.fetchone()
 
         if event_row is None:
@@ -154,39 +162,77 @@ def complete_call_from_callback(
                 f"No CALL_INITIATED event found for job_id={job_id}"
             )
 
+        # Update job
         cursor.execute(
             """
             UPDATE public.voice_bot_call_job
             SET
-                job_status='COMPLETED',
+                job_status = 'COMPLETED',
                 callback_received = TRUE,
                 callback_payload_file_path = %s,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = %s
             """,
-            (callback_payload_file_path, job_id),
+            (
+                callback_payload_file_path,
+                job_id,
+            ),
         )
 
         if cursor.rowcount != 1:
             raise RuntimeError(
-                f"Unable to update voice_bot_call_job job_id={job_id}"
+                f"Unable to update voice_bot_call_job "
+                f"job_id={job_id}"
+            )
+
+        # Find service
+        service_id = get_service_id_by_job_id(
+            conn,
+            job_id,
+        )
+
+        # Update service
+        cursor.execute(
+            """
+            UPDATE public.vehicle_service
+            SET
+                service_status = 'COMPLETED',
+                call_attempts = call_attempts + 1
+            WHERE id = %s
+            """,
+            (service_id,),
+        )
+
+        if cursor.rowcount != 1:
+            raise RuntimeError(
+                f"Unable to update vehicle_service "
+                f"service_id={service_id}"
             )
 
     conn.commit()
 
     logger.info(
-        "Completed voice call event and updated job job_id=%s event_id=%s",
+        "Completed voice call event and updated job "
+        "job_id=%s event_id=%s service_id=%s",
         job_id,
         event_row[0],
+        service_id,
     )
-def  complete_call_from_callback_failed(conn,job_id):
-     callback_message="call_intiated failed"
-     with conn.cursor() as cursor:
+def complete_call_from_callback_failed(
+    conn,
+    job_id: int,
+) -> None:
+    callback_message = "Voice call initiation/call failed."
+
+    try:
+        with conn.cursor() as cursor:
+
+            # CALL_INITIATED -> CALL_ERROR
             cursor.execute(
                 """
                 UPDATE public.voice_bot_call_job_event
                 SET
-                    event_status = 'Call_error',
+                    event_status = 'CALL_ERROR',
                     system_message = %s,
                     event_occurred_at = CURRENT_TIMESTAMP
                 WHERE id = (
@@ -199,11 +245,73 @@ def  complete_call_from_callback_failed(conn,job_id):
                 )
                 RETURNING id
                 """,
-                (callback_message[:500], job_id),
+                (
+                    callback_message[:500],
+                    job_id,
+                ),
             )
+
             event_row = cursor.fetchone()
-    
+
             if event_row is None:
                 raise RuntimeError(
-                    f"No CALL_INITIATED event found for job_id={job_id}"
+                    f"No CALL_INITIATED event found "
+                    f"for job_id={job_id}"
                 )
+
+            # Make job retryable
+            cursor.execute(
+                """
+                UPDATE public.voice_bot_call_job
+                SET
+                    job_status = 'PENDING',
+                    callback_received = FALSE,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+                RETURNING id
+                """,
+                (job_id,),
+            )
+
+            job_row = cursor.fetchone()
+
+            if job_row is None:
+                raise RuntimeError(
+                    f"voice_bot_call_job not found "
+                    f"for job_id={job_id}"
+                )
+
+        conn.commit()
+
+        logger.info(
+            "Updated CALL_ERROR for job_id=%s event_id=%s "
+            "and reset job to PENDING",
+            job_id,
+            event_row[0],
+        )
+
+    except Exception:
+        conn.rollback()
+        raise
+def get_service_id_by_job_id(
+    conn,
+    job_id: int,
+) -> int:
+    with conn.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT service_id
+            FROM public.voice_bot_call_job
+            WHERE id = %s
+            """,
+            (job_id,),
+        )
+
+        row = cursor.fetchone()
+
+    if row is None:
+        raise RuntimeError(
+            f"No service found for job_id={job_id}"
+        )
+
+    return int(row[0])

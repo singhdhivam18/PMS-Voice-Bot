@@ -13,7 +13,7 @@ def new_correlation_id() -> str:
     return str(uuid.uuid4())
 
 
-def build_message(row: dict, correlation_id: str) -> dict:
+def build_message(row: dict, correlation_id: str,event_id:int) -> dict:
     due_date = row["due_maintenance_date"]
     due_date_str = due_date.isoformat() if hasattr(due_date, "isoformat") else str(due_date)
 
@@ -29,5 +29,7 @@ def build_message(row: dict, correlation_id: str) -> dict:
             "due_maintenance_date": due_date_str,
             "maintenance_type": row["maintenance_type"],
             "preferred_language": row["preferred_language"],
+            "event_id":event_id
+
         },
     }

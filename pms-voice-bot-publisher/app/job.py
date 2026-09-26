@@ -45,12 +45,12 @@ def run_once(publisher: RabbitMQPublisher) -> dict:
             if not should_publish:
                 summary["skipped_duplicate"] += 1
                 continue
-
-            message = build_message(row, correlation_id)
+            event_id=db.insert_job_event(conn,job_id=job_id,event_status='INTIATED',system_message='could be Pubished')
+            message = build_message(row, correlation_id,event_id)
 
             try:
                 publisher.publish(message)
-                db.mark_published(conn, job_id=job_id)
+                db.mark_published(conn, job_id=job_id,event_id=event_id)
                 summary["published"] += 1
                 logger.info(
                     "Published event correlation_id=%s  registration_no=%s",
@@ -59,7 +59,7 @@ def run_once(publisher: RabbitMQPublisher) -> dict:
             except Exception as exc:
                 logger.exception("Publish failed for key=%s", correlation_id)
                 try:
-                    db.mark_failed(conn, service_id,str(exc))
+                    db.mark_publish_failed(conn, service_id,str(exc))
                 except Exception:
                     logger.exception("Also failed to record FAILED status for key=%s", correlation_id)
                 summary["failed"] += 1

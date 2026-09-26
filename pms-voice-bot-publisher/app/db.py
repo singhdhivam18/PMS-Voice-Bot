@@ -1,4 +1,3 @@
-
 """
 Database access layer.
 
@@ -14,7 +13,8 @@ PostgreSQL version.
 
 import logging
 
-import pyodbc
+import psycopg2
+from psycopg2.extensions import connection as PostgreSQLConnection
 
 from app.config import config
 
@@ -22,16 +22,25 @@ from app.config import config
 logger = logging.getLogger("publisher.db")
 
 
+# ---------------------------------------------------------------------------
 # Connection
+# ---------------------------------------------------------------------------
 
-def get_connection() -> pyodbc.Connection:
-    return pyodbc.connect(
-        config.db_connection_string,
-        autocommit=False,
+def get_connection() -> PostgreSQLConnection:
+    """Open a PostgreSQL connection with explicit transaction control."""
+    return psycopg2.connect(
+        host=config.DB_HOST,
+        port=config.DB_PORT,
+        dbname=config.DB_NAME,
+        user=config.DB_USER,
+        password=config.DB_PASSWORD,
+        connect_timeout=config.DB_CONNECT_TIMEOUT,
     )
 
 
+# ---------------------------------------------------------------------------
 # Fetch due services
+# ---------------------------------------------------------------------------
 
 _BASE_SELECT = """
 SELECT
@@ -72,20 +81,20 @@ AND vs.due_maintenance_date >= CURRENT_DATE
     if mode == "exact":
         sql = _BASE_SELECT + """
 AND vs.due_maintenance_date =
-    CURRENT_DATE + CAST(? AS INTEGER)
+    CURRENT_DATE + %s
 """
         return sql, (config.LEAD_DAYS,)
 
     sql = _BASE_SELECT + """
 AND vs.due_maintenance_date BETWEEN
     CURRENT_DATE
-    AND CURRENT_DATE + CAST(? AS INTEGER)
+    AND CURRENT_DATE + %s
 """
 
     return sql, (config.LEAD_DAYS,)
 
 
-def fetch_due_services(conn: pyodbc.Connection):
+def fetch_due_services(conn: PostgreSQLConnection):
     """Fetch services that are currently DUE according to QUERY_MODE."""
 
     sql, params = _build_query(config.QUERY_MODE)
@@ -116,33 +125,36 @@ def fetch_due_services(conn: pyodbc.Connection):
         cursor.close()
 
 
+# ---------------------------------------------------------------------------
 # Service ID
+# ---------------------------------------------------------------------------
 
 def get_service_id(row: dict) -> int:
     return int(row["service_id"])
 
 
+# ---------------------------------------------------------------------------
 # Claim for publish
+# ---------------------------------------------------------------------------
 
 def claim_for_publish(
-    conn: pyodbc.Connection,
+    conn: PostgreSQLConnection,
     service_id: int,
     correlation_id: str,
     row: dict,
-) -> bool:
+) -> tuple[int, bool]:
     """
     Ensure only one voice_bot_call_job exists for a service.
 
     If service_id already exists:
-        -> do nothing
-        -> return False
+        -> if FAILED, reuse the same row
+        -> otherwise do nothing
 
     If service_id does not exist:
         -> insert one PENDING job
-        -> return True
 
-    The UNIQUE constraint/index on service_id protects against
-    concurrent inserts.
+    Returns:
+        (job_id, should_publish)
     """
 
     cursor = conn.cursor()
@@ -150,43 +162,61 @@ def claim_for_publish(
     try:
         cursor.execute(
             """
-            SELECT id,job_status
+            SELECT
+                id,
+                job_status
             FROM public.voice_bot_call_job
-            WHERE service_id = ?
+            WHERE service_id = %s
             LIMIT 1
             """,
-            service_id,
+            (service_id,),
         )
 
         existing = cursor.fetchone()
+
         if existing is not None:
-            job_id = existing[0]
-            job_status=existing[1]
+            job_id = int(existing[0])
+            job_status = existing[1]
+
             if job_status == "FAILED":
                 cursor.execute(
                     """
                     UPDATE public.voice_bot_call_job
                     SET
-                        correlation_id = ?,
+                        correlation_id = %s,
                         job_status = 'PENDING',
                         callback_received = FALSE,
                         callback_payload_file_path = NULL,
                         updated_at = CURRENT_TIMESTAMP
-                    WHERE id = ?
+                    WHERE id = %s
                     """,
-                    correlation_id,
-                    job_id,
+                    (
+                        correlation_id,
+                        job_id,
+                    ),
                 )
 
                 conn.commit()
 
+                logger.info(
+                    "Reusing FAILED job_id=%s for retry, service_id=%s",
+                    job_id,
+                    service_id,
+                )
+
+                return job_id, True
+
+            conn.commit()
+
             logger.info(
-                "Skipping service_id=%s because job_id=%s already exists",
+                "Skipping service_id=%s because job_id=%s already exists "
+                "with status=%s",
                 service_id,
                 job_id,
+                job_status,
             )
 
-            return False
+            return job_id, False
 
         cursor.execute(
             """
@@ -200,19 +230,29 @@ def claim_for_publish(
             )
             VALUES
             (
-                ?,
-                ?,
+                %s,
+                %s,
                 'PENDING',
                 FALSE,
                 NULL
             )
             RETURNING id
             """,
-            service_id,
-            correlation_id,
+            (
+                service_id,
+                correlation_id,
+            ),
         )
 
         inserted = cursor.fetchone()
+
+        if inserted is None:
+            raise RuntimeError(
+                f"Failed to create voice_bot_call_job "
+                f"for service_id={service_id}"
+            )
+
+        job_id = int(inserted[0])
 
         conn.commit()
 
@@ -220,11 +260,11 @@ def claim_for_publish(
             "Created voice_bot_call_job: "
             "service_id=%s job_id=%s correlation_id=%s",
             service_id,
-            inserted[0],
+            job_id,
             correlation_id,
         )
 
-        return True,job_id
+        return job_id, True
 
     except Exception:
         conn.rollback()
@@ -240,12 +280,15 @@ def claim_for_publish(
         cursor.close()
 
 
+# ---------------------------------------------------------------------------
 # Mark published
+# ---------------------------------------------------------------------------
 
 def mark_published(
-    conn,
+    conn: PostgreSQLConnection,
     *,
     job_id: int,
+    event_id:int,
 ) -> None:
 
     cursor = conn.cursor()
@@ -257,9 +300,9 @@ def mark_published(
             SET
                 job_status = 'Proccessing',
                 updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
+            WHERE id = %s
             """,
-            job_id,
+            (job_id,),
         )
 
         if cursor.rowcount != 1:
@@ -268,21 +311,16 @@ def mark_published(
             )
 
         cursor.execute(
-            """
-            INSERT INTO public.voice_bot_call_job_event
-            (
-                job_id,
-                event_status,
-                system_message
-            )
-            VALUES
-            (
-                ?,
-                'PUBLISHED',
-                'Maintenance call event published to RabbitMQ successfully.'
-            )
+                        """
+            UPDATE public.voice_bot_call_job_event
+            SET
+                event_status = 'PUBLISHED',
+                system_message = %s,
+                event_occurred_at = CURRENT_TIMESTAMP
+            where id=%s"
             """,
-            job_id,
+            'Published successfully'
+            (event_id)
         )
 
         conn.commit()
@@ -293,10 +331,14 @@ def mark_published(
 
     finally:
         cursor.close()
+
+
+# ---------------------------------------------------------------------------
 # Mark failed
+# ---------------------------------------------------------------------------
 
 def mark_publish_failed(
-    conn,
+    conn: PostgreSQLConnection,
     *,
     job_id: int,
     error_message: str,
@@ -315,25 +357,26 @@ def mark_publish_failed(
     cursor = conn.cursor()
 
     try:
-        # Update the latest PUBLISHED event for this job.
         cursor.execute(
             """
             UPDATE public.voice_bot_call_job_event
             SET
                 event_status = 'NOT_PUBLISHED',
-                system_message = ?,
+                system_message = %s,
                 event_occurred_at = CURRENT_TIMESTAMP
             WHERE id = (
                 SELECT id
                 FROM public.voice_bot_call_job_event
-                WHERE job_id = ?
+                WHERE job_id = %s
                   AND event_status = 'PUBLISHED'
                 ORDER BY id DESC
                 LIMIT 1
             )
             """,
-            error_message[:500],
-            job_id,
+            (
+                error_message[:500],
+                job_id,
+            ),
         )
 
         if cursor.rowcount != 1:
@@ -342,16 +385,15 @@ def mark_publish_failed(
                 job_id,
             )
 
-        # Keep the job row and make it retryable.
         cursor.execute(
             """
             UPDATE public.voice_bot_call_job
             SET
                 job_status = 'FAILED',
                 updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
+            WHERE id = %s
             """,
-            job_id,
+            (job_id,),
         )
 
         if cursor.rowcount != 1:
@@ -359,19 +401,19 @@ def mark_publish_failed(
                 f"voice_bot_call_job not found: job_id={job_id}"
             )
 
-        # Service remains due.
         cursor.execute(
             """
             UPDATE public.vehicle_service
             SET
                 service_status = 'DUE'
+                call_attemptcall_attempts+1
             WHERE id = (
                 SELECT service_id
                 FROM public.voice_bot_call_job
-                WHERE id = ?
+                WHERE id = %s
             )
             """,
-            job_id,
+            (job_id,),
         )
 
         conn.commit()
@@ -396,8 +438,13 @@ def mark_publish_failed(
     finally:
         cursor.close()
 
+
+# ---------------------------------------------------------------------------
+# Insert job event
+# ---------------------------------------------------------------------------
+
 def insert_job_event(
-    conn,
+    conn: PostgreSQLConnection,
     *,
     job_id: int,
     event_status: str,
@@ -417,15 +464,17 @@ def insert_job_event(
             )
             VALUES
             (
-                ?,
-                ?,
-                ?
+                %s,
+                %s,
+                %s
             )
             RETURNING id
             """,
-            job_id,
-            event_status,
-            system_message[:500],
+            (
+                job_id,
+                event_status,
+                system_message[:500],
+            ),
         )
 
         row = cursor.fetchone()

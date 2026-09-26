@@ -75,6 +75,7 @@ def consume():
             due_maintenance_date = data["due_maintenance_date"]
             maintenance_type = data["maintenance_type"]
             preferred_language=data["preferred_language"]
+            event_id=data["event_id"]
             logger.info(
                 "Received RabbitMQ message event=%s version=%s "
                 "correlation_id=%s service_id=%s",
@@ -118,7 +119,7 @@ def consume():
             conn = db.get_connection()
             db.insert_call_initiated_event(
                 conn,
-                job_id=job_id,
+                event_id=event_id,
                 system_message=_build_call_event_message(
                     result,
                     correlation_id,
