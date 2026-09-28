@@ -50,13 +50,13 @@ TEST_DRIVER_PHONE = os.getenv("TEST_DRIVER_PHONE", "+919980014906")
 TEST_DRIVER_NAME = os.getenv("TEST_DRIVER_NAME", "Ayush")
 TEST_VEHICLE_REGISTRATION = os.getenv(
     "TEST_VEHICLE_REGISTRATION",
-    "KA01AB1532",
+    "KA01AB1539",
 )
 TEST_MAINTENANCE_TYPE = os.getenv(
     "TEST_MAINTENANCE_TYPE",
     "Regular",
 )
-TEST_LANGUAGE_CODE = os.getenv("TEST_LANGUAGE_CODE", "hi")
+TEST_LANGUAGE_CODE = os.getenv("TEST_LANGUAGE_CODE", "en")
 
 
 def get_connection() -> psycopg.Connection:

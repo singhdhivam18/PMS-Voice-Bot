@@ -1,18 +1,19 @@
 version: "3.9"
 
 services:
-  # ---------------------------------------------------------------------
+
+  # ============================================================
   # PostgreSQL
-  # ---------------------------------------------------------------------
+  # ============================================================
   postgres:
     image: postgres:16
     container_name: car-service-postgres
     restart: unless-stopped
 
     environment:
-      POSTGRES_DB: dev-voice-db
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
 
     ports:
       - "5432:5432"
@@ -20,12 +21,16 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
-      # Run automatically on first database initialization
+      # Run only during first database initialization
       - ./database/02_create_schema.sql:/docker-entrypoint-initdb.d/02_create_schema.sql:ro
       - ./database/03_master_data.sql:/docker-entrypoint-initdb.d/03_master_data.sql:ro
 
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d dev-voice-db"]
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"
+        ]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -33,67 +38,82 @@ services:
     networks:
       - car-service-net
 
-  # ---------------------------------------------------------------------
+
+  # ============================================================
   # RabbitMQ
-  # ---------------------------------------------------------------------
+  # ============================================================
   rabbitmq:
     image: rabbitmq:3.13-management
     container_name: car-service-rabbitmq
     restart: unless-stopped
 
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
+
     ports:
       - "5672:5672"
       - "15672:15672"
 
-    environment:
-      RABBITMQ_DEFAULT_USER: guest
-      RABBITMQ_DEFAULT_PASS: guest
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
 
     healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      test:
+        [
+          "CMD",
+          "rabbitmq-diagnostics",
+          "-q",
+          "ping"
+        ]
       interval: 10s
       timeout: 5s
       retries: 5
 
-    volumes:
-      - rabbitmq_data:/var/lib/rabbitmq
-
     networks:
       - car-service-net
 
-  # ---------------------------------------------------------------------
-  # Publisher Worker
-  # ---------------------------------------------------------------------
+
+  # ============================================================
+  # Publisher
+  # ============================================================
   publisher-worker:
     build:
-      context: .
+      context: ./pms-voice-bot-publisher
       dockerfile: Dockerfile
 
     container_name: car-service-publisher-worker
     restart: unless-stopped
 
-    env_file:
-      - .env
-
     environment:
-      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/%2F
-
-      # PostgreSQL connection
       DB_HOST: postgres
       DB_PORT: 5432
-      DB_NAME: dev-voice-db
-      DB_USER: postgres
-      DB_PASSWORD: postgres
+      DB_NAME: ${POSTGRES_DB}
+      DB_USER: ${POSTGRES_USER}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_CONNECT_TIMEOUT: 10
 
-      # If your application uses a single DATABASE_URL instead,
-      # use this instead of the DB_* variables:
-      # DATABASE_URL: postgresql://postgres:postgres@postgres:5432/dev-voice-db
+      RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@rabbitmq:5672/%2F
+      RABBITMQ_EXCHANGE: car_service_events
+      RABBITMQ_EXCHANGE_TYPE: topic
+      RABBITMQ_ROUTING_KEY: maintenance.call.requested
+
+      QUERY_MODE: ${QUERY_MODE}
+      LEAD_DAYS: ${LEAD_DAYS}
+
+      RUN_MODE: ${PUBLISHER_RUN_MODE}
+      SCHEDULE_INTERVAL_MINUTES: ${PUBLISHER_SCHEDULE_INTERVAL_MINUTES}
+      RUN_IMMEDIATELY_ON_START: ${RUN_IMMEDIATELY_ON_START}
+
+      HEALTH_CHECK_ENABLED: "true"
+      HEALTH_CHECK_PORT: 8080
+      LOG_LEVEL: ${LOG_LEVEL}
 
     depends_on:
-      rabbitmq:
+      postgres:
         condition: service_healthy
 
-      postgres:
+      rabbitmq:
         condition: service_healthy
 
     ports:
@@ -103,17 +123,157 @@ services:
       - car-service-net
 
 
-# -----------------------------------------------------------------------
-# Networks
-# -----------------------------------------------------------------------
+  # ============================================================
+  # Consumer Worker
+  # ============================================================
+  consumer-worker:
+    build:
+      context: ./pms-voice-bot-consumer
+      dockerfile: Dockerfile
+
+    container_name: car-service-consumer-worker
+    restart: unless-stopped
+
+    command:
+      [
+        "python",
+        "-m",
+        "app.main"
+      ]
+
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB}
+      DB_USER: ${POSTGRES_USER}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_CONNECT_TIMEOUT: 10
+
+      RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@rabbitmq:5672/%2F
+
+      VOICE_AGENT_BASE_URL: http://orchestrator:8000
+
+      CALLBACK_TIMEOUT_MINUTES: ${CALLBACK_TIMEOUT_MINUTES}
+      CALL_WATCHDOG_INTERVAL_SECONDS: ${CALL_WATCHDOG_INTERVAL_SECONDS}
+
+      LOG_LEVEL: ${LOG_LEVEL}
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+      rabbitmq:
+        condition: service_healthy
+
+      orchestrator:
+        condition: service_started
+
+    networks:
+      - car-service-net
+
+
+  # ============================================================
+  # Consumer Callback API
+  # ============================================================
+  consumer-api:
+    build:
+      context: ./pms-voice-bot-consumer
+      dockerfile: Dockerfile
+
+    container_name: car-service-consumer-api
+    restart: unless-stopped
+
+    command:
+      [
+        "uvicorn",
+        "app.callback_api:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "9000"
+      ]
+
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB}
+      DB_USER: ${POSTGRES_USER}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_CONNECT_TIMEOUT: 10
+
+      LOG_LEVEL: ${LOG_LEVEL}
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+    ports:
+      - "9000:9000"
+
+    networks:
+      - car-service-net
+
+
+  # ============================================================
+  # Orchestrator
+  # ============================================================
+  orchestrator:
+    build:
+      context: ./pms-voice-bot-orchestrator/PMS_voice_bot_fastapi
+      dockerfile: Dockerfile
+
+    container_name: car-service-orchestrator
+    restart: unless-stopped
+
+    command:
+      [
+        "uvicorn",
+        "backend.main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8000"
+      ]
+
+    environment:
+      ELEVENLABS_API_KEY: ${ELEVENLABS_API_KEY}
+      ELEVENLABS_AGENT_ID: ${ELEVENLABS_AGENT_ID}
+      ELEVENLABS_AGENT_PHONE_NUMBER_ID: ${ELEVENLABS_AGENT_PHONE_NUMBER_ID}
+      ELEVENLABS_WEBHOOK_SECRET: ${ELEVENLABS_WEBHOOK_SECRET}
+
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      GEMINI_MODEL: ${GEMINI_MODEL}
+
+      # Internal Docker URL
+      CALLBACK_URL: http://consumer-api:9000/api/voice/callback
+
+      # Used by /api/voice/callback proxy
+      CONSUMER_CALLBACK_INTERNAL_URL: http://consumer-api:9000/api/voice/callback
+
+      LOG_LEVEL: ${LOG_LEVEL}
+
+    depends_on:
+      consumer-api:
+        condition: service_started
+
+    ports:
+      - "8000:8000"
+
+    networks:
+      - car-service-net
+
+
+# ============================================================
+# Network
+# ============================================================
 networks:
   car-service-net:
     driver: bridge
 
 
-# -----------------------------------------------------------------------
-# Volumes
-# -----------------------------------------------------------------------
+# ============================================================
+# Persistent volumes
+# ============================================================
 volumes:
-  rabbitmq_data:
   postgres_data:
+  rabbitmq_data:
