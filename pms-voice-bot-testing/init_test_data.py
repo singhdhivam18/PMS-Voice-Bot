@@ -39,7 +39,7 @@ except ImportError:  # pragma: no cover - gives a clearer CLI error
     raise SystemExit(1)
 
 
-DB_HOST = os.getenv("DB_HOST", "localhost")
+DB_HOST = os.getenv("DB_HOST", "172.21.0.2")
 DB_PORT = os.getenv("DB_PORT", "5432")
 DB_NAME = os.getenv("DB_NAME", "dev-voice-db")
 DB_USER = os.getenv("DB_USER", "postgres")
@@ -50,13 +50,13 @@ TEST_DRIVER_PHONE = os.getenv("TEST_DRIVER_PHONE", "+917760589280")
 TEST_DRIVER_NAME = os.getenv("TEST_DRIVER_NAME", "Shivam")
 TEST_VEHICLE_REGISTRATION = os.getenv(
     "TEST_VEHICLE_REGISTRATION",
-    "KA01AB20265",
+    "KA01AB202612",
 )
 TEST_MAINTENANCE_TYPE = os.getenv(
     "TEST_MAINTENANCE_TYPE",
     "Regular",
 )
-TEST_LANGUAGE_CODE = os.getenv("TEST_LANGUAGE_CODE", "hi")
+TEST_LANGUAGE_CODE = os.getenv("TEST_LANGUAGE_CODE", "kn")
 
 
 def get_connection() -> psycopg.Connection:

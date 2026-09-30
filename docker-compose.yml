@@ -41,7 +41,7 @@ services:
   # Publisher
   # ============================================================
   publisher-worker:
-    build:
+    image: ghcr.io/singhdhivam18/pms-voice-bot-publisher:1.0.0
       context: ./pms-voice-bot-publisher
       dockerfile: Dockerfile
 
@@ -89,7 +89,7 @@ services:
   # Consumer Worker
   # ============================================================
   consumer-worker:
-    build:
+    image: ghcr.io/singhdhivam18/pms-voice-bot-consumer:1.0.0
       context: ./pms-voice-bot-consumer
       dockerfile: Dockerfile
 
@@ -179,7 +179,7 @@ services:
   # Orchestrator
   # ============================================================
   orchestrator:
-    build:
+    image: ghcr.io/singhdhivam18/pms-voice-bot-orchestrator:1.0.0
       context: ./pms-voice-bot-orchestrator/PMS_voice_bot_fastapi
       dockerfile: Dockerfile
 
