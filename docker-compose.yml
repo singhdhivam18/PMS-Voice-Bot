@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
 
   # ============================================================
@@ -40,41 +38,6 @@ services:
 
 
   # ============================================================
-  # RabbitMQ
-  # ============================================================
-  rabbitmq:
-    image: rabbitmq:3.13-management
-    container_name: car-service-rabbitmq
-    restart: unless-stopped
-
-    environment:
-      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER}
-      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
-
-    ports:
-      - "5672:5672"
-      - "15672:15672"
-
-    volumes:
-      - rabbitmq_data:/var/lib/rabbitmq
-
-    healthcheck:
-      test:
-        [
-          "CMD",
-          "rabbitmq-diagnostics",
-          "-q",
-          "ping"
-        ]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-    networks:
-      - car-service-net
-
-
-  # ============================================================
   # Publisher
   # ============================================================
   publisher-worker:
@@ -93,7 +56,8 @@ services:
       DB_PASSWORD: ${POSTGRES_PASSWORD}
       DB_CONNECT_TIMEOUT: 10
 
-      RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@rabbitmq:5672/%2F
+      # Existing RabbitMQ container
+      RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@invoice-rabbitmq:5672/%2F
       RABBITMQ_EXCHANGE: car_service_events
       RABBITMQ_EXCHANGE_TYPE: topic
       RABBITMQ_ROUTING_KEY: maintenance.call.requested
@@ -113,14 +77,12 @@ services:
       postgres:
         condition: service_healthy
 
-      rabbitmq:
-        condition: service_healthy
-
     ports:
       - "8080:8080"
 
     networks:
       - car-service-net
+      - rabbitmq-net
 
 
   # ============================================================
@@ -149,7 +111,8 @@ services:
       DB_PASSWORD: ${POSTGRES_PASSWORD}
       DB_CONNECT_TIMEOUT: 10
 
-      RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@rabbitmq:5672/%2F
+      # Existing RabbitMQ container
+      RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@invoice-rabbitmq:5672/%2F
 
       VOICE_AGENT_BASE_URL: http://orchestrator:8000
 
@@ -162,14 +125,12 @@ services:
       postgres:
         condition: service_healthy
 
-      rabbitmq:
-        condition: service_healthy
-
       orchestrator:
         condition: service_started
 
     networks:
       - car-service-net
+      - rabbitmq-net
 
 
   # ============================================================
@@ -264,11 +225,18 @@ services:
 
 
 # ============================================================
-# Network
+# Networks
 # ============================================================
 networks:
+
+  # PMS application network
   car-service-net:
     driver: bridge
+
+  # Existing RabbitMQ network
+  rabbitmq-net:
+    external: true
+    name: DocExtract-Agent
 
 
 # ============================================================
@@ -276,4 +244,3 @@ networks:
 # ============================================================
 volumes:
   postgres_data:
-  rabbitmq_data:

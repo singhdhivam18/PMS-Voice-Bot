@@ -46,17 +46,17 @@ DB_USER = os.getenv("DB_USER", "postgres")
 DB_PASSWORD = os.getenv("DB_PASSWORD", "Test@123")
 
 # Stable values make the script safe to execute repeatedly.
-TEST_DRIVER_PHONE = os.getenv("TEST_DRIVER_PHONE", "+919980014906")
-TEST_DRIVER_NAME = os.getenv("TEST_DRIVER_NAME", "Ayush")
+TEST_DRIVER_PHONE = os.getenv("TEST_DRIVER_PHONE", "+917760589280")
+TEST_DRIVER_NAME = os.getenv("TEST_DRIVER_NAME", "Shivam")
 TEST_VEHICLE_REGISTRATION = os.getenv(
     "TEST_VEHICLE_REGISTRATION",
-    "KA01AB1539",
+    "KA01AB20265",
 )
 TEST_MAINTENANCE_TYPE = os.getenv(
     "TEST_MAINTENANCE_TYPE",
     "Regular",
 )
-TEST_LANGUAGE_CODE = os.getenv("TEST_LANGUAGE_CODE", "en")
+TEST_LANGUAGE_CODE = os.getenv("TEST_LANGUAGE_CODE", "hi")
 
 
 def get_connection() -> psycopg.Connection:

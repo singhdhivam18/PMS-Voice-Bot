@@ -14,6 +14,14 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from .voice_agent_config import (
+    VOICE_AGENT_SYSTEM_PROMPT,
+    SUPPORTED_LANGUAGES,
+    build_first_message,
+    normalize_language,
+)
+
+
 
 load_dotenv()
 
@@ -223,79 +231,6 @@ def config() -> dict[str, Any]:
         ),
         "defaults": DEFAULTS,
     }
-SUPPORTED_LANGUAGES = {
-    "en": "English",
-    "hi": "Hindi",
-    "kn": "Kannada",
-    "ta": "Tamil",
-    "te": "Telugu",
-    "ml": "Malayalam",
-}
-FIRST_MESSAGE_TEMPLATES = {
-    "en": (
-        "Hi {driver_name}, this is Subha from Dheeraj's service team. "
-        "I'm calling about a PMS reminder for your car {car_number}. "
-        "The PMS is due on {due_date}. "
-        "Would you like to book an appointment?"
-    ),
-
-    "hi": (
-        "नमस्ते {driver_name}, मैं Dheeraj की सर्विस टीम से Subha बोल रहा हूँ। "
-        "आपकी कार {car_number} की PMS सर्विस {due_date} को due है। "
-        "क्या आप इसका appointment book करना चाहेंगे?"
-    ),
-
-    "kn": (
-        "ನಮಸ್ಕಾರ {driver_name}, ನಾನು Dheeraj ಸರ್ವಿಸ್ ಟೀಮ್‌ನಿಂದ Subha ಮಾತನಾಡುತ್ತಿದ್ದೇನೆ. "
-        "ನಿಮ್ಮ ಕಾರ್ {car_number}ಗೆ PMS ಸರ್ವಿಸ್ {due_date}ರಂದು due ಇದೆ. "
-        "ನೀವು appointment book ಮಾಡಿಕೊಳ್ಳುತ್ತೀರಾ?"
-    ),
-
-    "ta": (
-        "வணக்கம் {driver_name}, நான் Dheeraj சர்வீஸ் டீம்ல இருந்து Subha பேசுறேன். "
-        "உங்க கார் {car_number}க்கு PMS சர்வீஸ் {due_date} அன்று due இருக்கு. "
-        "Appointment book பண்ணிக்கலாமா?"
-    ),
-
-    "te": (
-        "నమస్కారం {driver_name}, నేను Dheeraj సర్వీస్ టీమ్ నుంచి Subha మాట్లాడుతున్నాను. "
-        "మీ కార్ {car_number}కి PMS సర్వీస్ {due_date}న due ఉంది. "
-        "Appointment book చేయాలనుకుంటున్నారా?"
-    ),
-
-    "ml": (
-        "നമസ്കാരം {driver_name}, ഞാൻ Dheeraj സർവീസ് ടീമിൽ നിന്ന് Subha ആണ് സംസാരിക്കുന്നത്. "
-        "നിങ്ങളുടെ കാർ {car_number}ന്റെ PMS സർവീസ് {due_date}ന് due ആണ്. "
-        "Appointment book ചെയ്യണോ?"
-    ),
-}
-def normalize_language(value: str | None) -> str:
-    language = (value or "").strip().lower()
-
-    if language not in SUPPORTED_LANGUAGES:
-        logger.warning(
-            "Unsupported preferred_language=%r. Falling back to English.",
-            value,
-        )
-        return "en"
-
-    return language
-
-
-def build_first_message(
-    language: str,
-    driver_name: str,
-    car_number: str,
-    due_date: str,
-) -> str:
-    template = FIRST_MESSAGE_TEMPLATES[language]
-
-    return template.format(
-        driver_name=driver_name,
-        car_number=car_number,
-        due_date=due_date,
-    )
-
 @app.post("/api/outbound-call")
 async def outbound_call(request: OutboundCallRequest) -> dict[str, Any]:
     """Start the real outbound phone call through ElevenLabs' Twilio integration."""
@@ -359,6 +294,9 @@ async def outbound_call(request: OutboundCallRequest) -> dict[str, Any]:
                 "agent": {
                     "language": preferred_language,
                     "first_message": first_message,
+                    "prompt": {
+                        "prompt": VOICE_AGENT_SYSTEM_PROMPT,
+                    },
                 }
             },
         },

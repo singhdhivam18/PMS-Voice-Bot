@@ -319,8 +319,8 @@ def mark_published(
                 event_occurred_at = CURRENT_TIMESTAMP
             where id=%s"
             """,
-            'Published successfully'
-            (event_id)
+            'Published successfully',
+            (event_id),
         )
 
         conn.commit()
